@@ -1,0 +1,114 @@
+name: publish-latest
+
+on:
+  push:
+    branches:
+      - publish
+    paths:
+      - "release/**"
+      - ".github/workflows/publish-latest.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-latest
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate manifest, notes, and archives
+        run: |
+          python3 <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import re
+          import tarfile
+          import zipfile
+
+          root = pathlib.Path("release")
+          manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+          notes = (root / "notes.md").read_text(encoding="utf-8").strip()
+          version = manifest["version"]
+          source_commit = manifest["source_commit"]
+          if not re.fullmatch(r"v\d{4}\.\d{4}\.\d{4}", version):
+              raise SystemExit(f"invalid version: {version}")
+          if not re.fullmatch(r"[0-9a-f]{40}", source_commit):
+              raise SystemExit(f"invalid source commit: {source_commit}")
+          if version not in notes or source_commit not in notes or "## 更新内容" not in notes:
+              raise SystemExit("release notes must contain version, source commit, and 更新内容")
+
+          expected_names = {
+              "im2agent-windows-amd64.zip": "im2agent.exe",
+              "im2agent-macos-amd64.tar.gz": "im2agent",
+              "im2agent-macos-arm64.tar.gz": "im2agent",
+          }
+          assets = manifest.get("assets", [])
+          if {item.get("name") for item in assets} != set(expected_names):
+              raise SystemExit("manifest must contain exactly the three supported platform archives")
+
+          required = {"README.md", "LICENSE", "config.example.yaml"}
+          for item in assets:
+              name = item["name"]
+              path = root / "assets" / name
+              raw = path.read_bytes()
+              if len(raw) != item["size"]:
+                  raise SystemExit(f"size mismatch: {name}")
+              digest = hashlib.sha256(raw).hexdigest()
+              if digest != item["sha256"]:
+                  raise SystemExit(f"sha256 mismatch: {name}")
+              if name.endswith(".zip"):
+                  with zipfile.ZipFile(path) as archive:
+                      members = {entry.filename.lstrip("./") for entry in archive.infolist() if not entry.is_dir()}
+                      binary = archive.read(expected_names[name])
+              else:
+                  with tarfile.open(path, "r:gz") as archive:
+                      members = {entry.name.lstrip("./") for entry in archive.getmembers() if entry.isfile()}
+                      extracted = archive.extractfile("./" + expected_names[name]) or archive.extractfile(expected_names[name])
+                      if extracted is None:
+                          raise SystemExit(f"binary missing: {name}")
+                      binary = extracted.read()
+              if not required.issubset(members) or expected_names[name] not in members:
+                  raise SystemExit(f"archive layout is incomplete: {name}")
+              if version.encode() not in binary:
+                  raise SystemExit(f"embedded version missing: {name}")
+          PY
+
+      - name: Upload assets, then update release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view latest >/dev/null 2>&1; then
+            gh release create latest --title latest --notes-file release/notes.md
+          fi
+          gh release upload latest release/assets/* --clobber
+          gh release edit latest --title latest --notes-file release/notes.md --latest
+
+      - name: Verify published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/latest" > release/published.json
+          python3 <<'PY'
+          import json
+          import pathlib
+
+          root = pathlib.Path("release")
+          manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+          notes = (root / "notes.md").read_text(encoding="utf-8").strip()
+          published = json.loads((root / "published.json").read_text(encoding="utf-8"))
+          if published.get("body", "").strip() != notes:
+              raise SystemExit("published release notes do not match notes.md")
+          remote = {asset["name"]: asset for asset in published.get("assets", [])}
+          for item in manifest["assets"]:
+              asset = remote.get(item["name"])
+              if not asset or asset.get("size") != item["size"]:
+                  raise SystemExit(f"published size mismatch: {item['name']}")
+              if asset.get("digest", "").lower() != "sha256:" + item["sha256"].lower():
+                  raise SystemExit(f"published digest mismatch: {item['name']}")
+          PY
