@@ -68,8 +68,13 @@ jobs:
                       binary = archive.read(expected_names[name])
               else:
                   with tarfile.open(path, "r:gz") as archive:
-                      members = {entry.name.lstrip("./") for entry in archive.getmembers() if entry.isfile()}
-                      extracted = archive.extractfile("./" + expected_names[name]) or archive.extractfile(expected_names[name])
+                      archive_entries = [entry for entry in archive.getmembers() if entry.isfile()]
+                      members = {entry.name.lstrip("./") for entry in archive_entries}
+                      binary_entry = next(
+                          (entry for entry in archive_entries if entry.name.lstrip("./") == expected_names[name]),
+                          None,
+                      )
+                      extracted = archive.extractfile(binary_entry) if binary_entry is not None else None
                       if extracted is None:
                           raise SystemExit(f"binary missing: {name}")
                       binary = extracted.read()
