@@ -1,0 +1,44 @@
+name: verify-native-binaries
+
+on:
+  workflow_run:
+    workflows:
+      - publish-latest
+    types:
+      - completed
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.event.workflow_run.conclusion == 'success'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            architecture: x86_64
+            asset: im2agent-macos-amd64.tar.gz
+          - runner: macos-15
+            architecture: arm64
+            asset: im2agent-macos-arm64.tar.gz
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: publish
+
+      - name: Run native binary version check
+        env:
+          EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
+          ASSET_NAME: ${{ matrix.asset }}
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "${EXPECTED_ARCHITECTURE}"
+          expected="$(python3 -c 'import json; print(json.load(open("release/manifest.json"))["version"])')"
+          mkdir extracted
+          tar -xzf "release/assets/${ASSET_NAME}" -C extracted
+          test -x extracted/im2agent
+          actual="$(extracted/im2agent --version | tr -d '\r\n')"
+          test "${actual}" = "${expected}"
