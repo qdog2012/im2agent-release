@@ -16,7 +16,77 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  verify:
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            architecture: amd64
+            asset: im2agent-windows-amd64.zip
+            binary: im2agent.exe
+          - runner: macos-15-intel
+            architecture: x86_64
+            asset: im2agent-macos-amd64.tar.gz
+            binary: im2agent
+          - runner: macos-15
+            architecture: arm64
+            asset: im2agent-macos-arm64.tar.gz
+            binary: im2agent
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify archive and run native binary
+        shell: bash
+        env:
+          EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
+          ASSET_NAME: ${{ matrix.asset }}
+          BINARY_NAME: ${{ matrix.binary }}
+        run: |
+          python <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import platform
+          import subprocess
+          import tarfile
+          import zipfile
+
+          assert platform.machine().lower() == os.environ['EXPECTED_ARCHITECTURE']
+          root = pathlib.Path('release')
+          manifest = json.loads((root / 'manifest.json').read_text(encoding='utf-8'))
+          name = os.environ['ASSET_NAME']
+          entry = next(item for item in manifest['assets'] if item['name'] == name)
+          archive = root / 'assets' / name
+          raw = archive.read_bytes()
+          assert len(raw) == entry['size']
+          assert hashlib.sha256(raw).hexdigest() == entry['sha256']
+          target = pathlib.Path('extracted')
+          target.mkdir()
+          if name.endswith('.zip'):
+              with zipfile.ZipFile(archive) as package:
+                  assert package.testzip() is None
+                  package.extractall(target)
+          else:
+              with tarfile.open(archive, 'r:gz') as package:
+                  package.extractall(target, filter='data')
+              assert (target / os.environ['BINARY_NAME']).stat().st_mode & 0o777 == 0o755
+          binary = (target / os.environ['BINARY_NAME']).resolve()
+          actual = subprocess.check_output([str(binary), '--version'], text=True, timeout=30).strip()
+          assert actual == manifest['version'], actual
+          help_text = subprocess.check_output([str(binary), '--help'], timeout=30)
+          assert b'--service-status' in help_text and b'--version' in help_text
+          print(f'{platform.system()} {platform.machine()}: {actual}, --version and --help passed')
+          PY
+
   publish:
+    needs: verify
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -84,15 +154,39 @@ jobs:
                   raise SystemExit(f"embedded version missing: {name}")
           PY
 
-      - name: Upload assets, then update release notes
+      - name: Upload assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           if ! gh release view latest >/dev/null 2>&1; then
-            gh release create latest --title latest --notes-file release/notes.md
+            gh release create latest --title latest --draft --notes 'Uploading verified release assets'
           fi
           gh release upload latest release/assets/* --clobber
-          gh release edit latest --title latest --notes-file release/notes.md --latest
+
+      - name: Verify uploaded assets before updating release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/latest" > release/uploaded.json
+          python3 <<'PY'
+          import json
+          import pathlib
+          root = pathlib.Path('release')
+          manifest = json.loads((root / 'manifest.json').read_text(encoding='utf-8'))
+          uploaded = json.loads((root / 'uploaded.json').read_text(encoding='utf-8'))
+          remote = {item['name']: item for item in uploaded['assets']}
+          assert set(remote) == {item['name'] for item in manifest['assets']}
+          for item in manifest['assets']:
+              asset = remote[item['name']]
+              assert asset['size'] == item['size'], item['name']
+              assert asset.get('digest', '').lower() == 'sha256:' + item['sha256'].lower(), item['name']
+          PY
+
+      - name: Update release notes after asset verification
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release edit latest --title latest --notes-file release/notes.md --latest --draft=false
 
       - name: Verify published release
         env:
