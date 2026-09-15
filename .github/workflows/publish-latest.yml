@@ -4,9 +4,11 @@ on:
   push:
     branches:
       - publish
+      - main
     paths:
       - "release/**"
       - ".github/workflows/publish-latest.yml"
+      - "scripts/**"
 
 permissions:
   contents: write
@@ -16,7 +18,17 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  readme-tests:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m unittest discover -s scripts -p 'test_*.py'
+
   verify:
+    if: github.ref == 'refs/heads/publish'
+    needs: readme-tests
     permissions:
       contents: read
     strategy:
@@ -154,6 +166,19 @@ jobs:
                   raise SystemExit(f"embedded version missing: {name}")
           PY
 
+      - name: Check out the repository homepage
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: release-homepage
+
+      - name: Prepare homepage release notes
+        run: >-
+          python3 scripts/update_release_readme.py
+          --manifest release/manifest.json
+          --notes release/notes.md
+          --readme release-homepage/README.md
+
       - name: Upload assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -210,4 +235,29 @@ jobs:
                   raise SystemExit(f"published size mismatch: {item['name']}")
               if asset.get("digest", "").lower() != "sha256:" + item["sha256"].lower():
                   raise SystemExit(f"published digest mismatch: {item['name']}")
+          PY
+
+      - name: Publish and verify homepage release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          git -C release-homepage config user.name 'github-actions[bot]'
+          git -C release-homepage config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C release-homepage add -- README.md
+          if ! git -C release-homepage diff --cached --quiet; then
+            git -C release-homepage commit -m 'docs: sync latest release notes to README'
+            git -C release-homepage push origin "HEAD:refs/heads/${DEFAULT_BRANCH}"
+          fi
+          gh api "repos/${GITHUB_REPOSITORY}/readme?ref=${DEFAULT_BRANCH}" > release/homepage.json
+          python3 <<'PY'
+          import base64
+          import json
+          import pathlib
+
+          expected = pathlib.Path('release-homepage/README.md').read_text(encoding='utf-8')
+          published = json.loads(pathlib.Path('release/homepage.json').read_text(encoding='utf-8'))
+          actual = base64.b64decode(published['content']).decode('utf-8')
+          if actual != expected:
+              raise SystemExit('public repository README does not match the release notes')
           PY
