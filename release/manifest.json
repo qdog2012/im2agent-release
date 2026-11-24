@@ -1,0 +1,21 @@
+{
+  "version": "v2026.1124.1243",
+  "source_commit": "9d4070732f1e5329ff7ec5d8c95bd522865f588a",
+  "assets": [
+    {
+      "name": "im2agent-windows-amd64.zip",
+      "size": 5935866,
+      "sha256": "7fdf4a73cdd9fec11fcf25cb6de3c9f37bc2cbe49b626ec005d19d4eba96fe4b"
+    },
+    {
+      "name": "im2agent-macos-amd64.tar.gz",
+      "size": 5865719,
+      "sha256": "5c16806350f954d921f91734853e55d41ac6e05714afd71ba676a1458e940fbd"
+    },
+    {
+      "name": "im2agent-macos-arm64.tar.gz",
+      "size": 5435747,
+      "sha256": "d6d90aee9e000bfcd0789ad78ddff4d49318182826dff820c3e3a102cd77f210"
+    }
+  ]
+}
